@@ -1,0 +1,4 @@
+{
+  "functions": {"api/*.ts":{"maxDuration":30}},
+  "rewrites":[{"source":"/mcp","destination":"/api/mcp"},{"source":"/health","destination":"/api/health"}]
+}
