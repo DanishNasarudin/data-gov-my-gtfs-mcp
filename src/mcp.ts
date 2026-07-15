@@ -3,13 +3,14 @@ import { z } from "zod";
 import { FEEDS, type FeedKey } from "./feeds.js";
 import { distanceKm, fetchVehicles } from "./gtfs-realtime.js";
 import { getStationDepartures } from "./gtfs-static.js";
+import { getLiveStationEstimate } from "./live-estimate.js";
 
 const feedKeys = Object.keys(FEEDS) as FeedKey[];
 const feedSchema = z.enum(feedKeys as [FeedKey, ...FeedKey[]]);
 const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
 
 export function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "data-gov-my-gtfs", version: "1.1.0" });
+  const server = new McpServer({ name: "data-gov-my-gtfs", version: "1.3.0" });
 
   server.registerTool("list_feeds", {
     title: "List Malaysian GTFS feeds",
@@ -67,6 +68,17 @@ export function createMcpServer(): McpServer {
       limit: z.number().int().min(1).max(100).default(30)
     }
   }, async (input) => text(await getStationDepartures(input)));
+
+  server.registerTool("get_live_station_estimate", {
+    title: "Estimate a live KTMB station arrival",
+    description: "Derive a non-official ETA to a KTMB station from the current vehicle-position feed. Results are approximate and include confidence and methodology warnings.",
+    inputSchema: {
+      station: z.string().min(1).describe("Target KTMB station name, for example Midvalley"),
+      tripId: z.string().optional().describe("Optional trip ID, for example 2047 or weekday_2047"),
+      assumedSpeedKph: z.number().min(10).max(120).default(45).describe("Fallback average speed when realtime speed is missing or unusable"),
+      maxCandidates: z.number().int().min(1).max(20).default(5)
+    }
+  }, async (input) => text(await getLiveStationEstimate(input)));
 
   return server;
 }
