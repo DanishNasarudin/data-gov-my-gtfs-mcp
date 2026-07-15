@@ -27,9 +27,10 @@ export interface StationDeparture {
   destination?: string;
   directionId?: string;
   serviceId: string;
+  serviceActive: boolean;
 }
 
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const CACHE_TTL_MS = 30 * 60 * 1000;
 const cache = new Map<FeedKey, StaticGtfs>();
 
 function parseCsv(zip: AdmZip, filename: string, required = true): Row[] {
@@ -52,7 +53,7 @@ async function loadStaticGtfs(feed: FeedKey): Promise<StaticGtfs> {
   if (existing && Date.now() - existing.loadedAt < CACHE_TTL_MS) return existing;
 
   const response = await fetch(staticFeedUrl(feed), {
-    headers: { "user-agent": "data-gov-my-gtfs-mcp/1.1" },
+    headers: { "user-agent": "data-gov-my-gtfs-mcp/1.2" },
     signal: AbortSignal.timeout(30_000)
   });
   if (!response.ok) throw new Error(`Static GTFS returned ${response.status} ${response.statusText}`);
@@ -128,6 +129,13 @@ export async function getStationDepartures(input: {
   windowMinutes: number;
   matchedStations: Array<{ stopId: string; stopName: string }>;
   departures: StationDeparture[];
+  excludedByServiceCalendar: StationDeparture[];
+  diagnostics: {
+    totalNearbyStopTimes: number;
+    activeServiceCount: number;
+    source: string;
+    warning?: string;
+  };
   staticFeedLoadedAt: string;
 }> {
   const data = await loadStaticGtfs(input.feed);
@@ -151,11 +159,23 @@ export async function getStationDepartures(input: {
   const windowSeconds = input.windowMinutes * 60;
   const directionQuery = input.direction ? normalize(input.direction) : undefined;
 
-  const departures = data.stopTimes.flatMap((stopTime): StationDeparture[] => {
+  const finalStopTimeByTrip = new Map<string, Row>();
+  for (const stopTime of data.stopTimes) {
+    const current = finalStopTimeByTrip.get(stopTime.trip_id);
+    if (!current || Number(stopTime.stop_sequence) > Number(current.stop_sequence)) {
+      finalStopTimeByTrip.set(stopTime.trip_id, stopTime);
+    }
+  }
+
+  const nearby: StationDeparture[] = data.stopTimes.flatMap((stopTime): StationDeparture[] => {
     if (!matchedIds.has(stopTime.stop_id)) return [];
     const trip = tripById.get(stopTime.trip_id);
-    if (!trip || !services.has(trip.service_id)) return [];
-    if (directionQuery && !normalize(trip.trip_headsign ?? "").includes(directionQuery)) return [];
+    if (!trip) return [];
+
+    const finalStopTime = finalStopTimeByTrip.get(trip.trip_id);
+    const inferredDestination = finalStopTime ? stopById.get(finalStopTime.stop_id)?.stop_name : undefined;
+    const destination = trip.trip_headsign || inferredDestination;
+    if (directionQuery && !normalize(destination ?? "").includes(directionQuery)) return [];
 
     const departureSeconds = timeToSeconds(stopTime.departure_time || stopTime.arrival_time);
     if (!Number.isFinite(departureSeconds) || Math.abs(departureSeconds - center) > windowSeconds) return [];
@@ -172,11 +192,18 @@ export async function getStationDepartures(input: {
       routeShortName: route?.route_short_name || undefined,
       routeLongName: route?.route_long_name || undefined,
       tripId: trip.trip_id,
-      destination: trip.trip_headsign || undefined,
+      destination: destination || undefined,
       directionId: trip.direction_id || undefined,
-      serviceId: trip.service_id
+      serviceId: trip.service_id,
+      serviceActive: services.has(trip.service_id)
     }];
-  }).sort((a, b) => timeToSeconds(a.departureTime) - timeToSeconds(b.departureTime)).slice(0, input.limit);
+  }).sort((a, b) => timeToSeconds(a.departureTime) - timeToSeconds(b.departureTime));
+
+  const departures = nearby.filter((departure) => departure.serviceActive).slice(0, input.limit);
+  const excludedByServiceCalendar = nearby.filter((departure) => !departure.serviceActive).slice(0, input.limit);
+  const warning = departures.length === 0 && excludedByServiceCalendar.length === 0
+    ? "No matching stop time exists in the current data.gov.my static GTFS archive. The KTMB app may use a newer or separate internal timetable."
+    : undefined;
 
   return {
     feed: input.feed,
@@ -185,6 +212,13 @@ export async function getStationDepartures(input: {
     windowMinutes: input.windowMinutes,
     matchedStations: stationRows.slice(0, 10).map((stop) => ({ stopId: stop.stop_id, stopName: stop.stop_name })),
     departures,
+    excludedByServiceCalendar,
+    diagnostics: {
+      totalNearbyStopTimes: nearby.length,
+      activeServiceCount: services.size,
+      source: staticFeedUrl(input.feed),
+      warning
+    },
     staticFeedLoadedAt: new Date(data.loadedAt).toISOString()
   };
 }
